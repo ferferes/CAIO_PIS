@@ -308,6 +308,120 @@ def notificar_novos_concursos(novos_ids):
                     continue
     return enviados
 
+def notificar_catalogo_para_chat(chat_id):
+    """Envia todos os concursos abertos do catálogo ainda não notificados para um chat_id."""
+    if os.getenv("CAIO_NOTIFICAR_TELEGRAM") != "1":
+        return 0
+    token = os.getenv("TEL_TOKEN", "").strip()
+    if not token:
+        return 0
+    try:
+        import telebot
+    except ImportError:
+        return 0
+
+    agora = _agora_iso()
+    hoje_iso = _hoje_sp().isoformat()
+    with banco() as db:
+        perfil = db.execute(
+            "SELECT id, q, uf, nivel FROM perfis WHERE telegram_chat_id = ? AND avisos_telegram = 1 LIMIT 1",
+            (chat_id,),
+        ).fetchone()
+        if not perfil:
+            return 0
+        termos = _norm_texto(perfil["q"]).split()
+        concursos = db.execute(
+            "SELECT * FROM concursos WHERE exemplo = 0 AND situacao = 'Publicado' AND prazo >= ? ORDER BY prazo ASC",
+            (hoje_iso,),
+        ).fetchall()
+
+        bot = telebot.TeleBot(token)
+        enviados = 0
+        for conc in concursos:
+            if perfil["uf"] and conc["uf"] != perfil["uf"]:
+                continue
+            if perfil["nivel"] and conc["nivel"] != "Vários" and conc["nivel"] != perfil["nivel"]:
+                continue
+            alvo = _norm_texto(
+                f"{conc['titulo']} {conc['orgao']} {conc['requisitos']} {conc['localizacao']}"
+            )
+            if not all(t in alvo for t in termos):
+                continue
+            ja_enviado = db.execute(
+                "SELECT 1 FROM notificacoes_enviadas WHERE concurso_id = ? AND chat_id = ?",
+                (conc["id"], chat_id),
+            ).fetchone()
+            if ja_enviado:
+                continue
+            try:
+                bot.send_message(chat_id, _formatar_mensagem_telegram(conc), disable_web_page_preview=True)
+                db.execute(
+                    "INSERT OR IGNORE INTO notificacoes_enviadas (concurso_id, chat_id, enviado_em) VALUES (?, ?, ?)",
+                    (conc["id"], chat_id, agora),
+                )
+                enviados += 1
+                time.sleep(0.15)
+            except Exception:
+                continue
+    return enviados
+
+def notificar_catalogo_para_perfil(perfil_id):
+    """Envia todos os concursos abertos do catálogo ainda não notificados para um perfil específico."""
+    if os.getenv("CAIO_NOTIFICAR_TELEGRAM") != "1":
+        return 0
+    token = os.getenv("TEL_TOKEN", "").strip()
+    if not token:
+        return 0
+    try:
+        import telebot
+    except ImportError:
+        return 0
+
+    agora = _agora_iso()
+    hoje_iso = _hoje_sp().isoformat()
+    with banco() as db:
+        perfil = db.execute(
+            "SELECT id, q, uf, nivel, telegram_chat_id FROM perfis WHERE id = ? AND avisos_telegram = 1 AND telegram_chat_id IS NOT NULL",
+            (perfil_id,),
+        ).fetchone()
+        if not perfil:
+            return 0
+        chat_id = perfil["telegram_chat_id"]
+        termos = _norm_texto(perfil["q"]).split()
+        concursos = db.execute(
+            "SELECT * FROM concursos WHERE exemplo = 0 AND situacao = 'Publicado' AND prazo >= ? ORDER BY prazo ASC",
+            (hoje_iso,),
+        ).fetchall()
+
+        bot = telebot.TeleBot(token)
+        enviados = 0
+        for conc in concursos:
+            if perfil["uf"] and conc["uf"] != perfil["uf"]:
+                continue
+            if perfil["nivel"] and conc["nivel"] != "Vários" and conc["nivel"] != perfil["nivel"]:
+                continue
+            alvo = _norm_texto(
+                f"{conc['titulo']} {conc['orgao']} {conc['requisitos']} {conc['localizacao']}"
+            )
+            if not all(t in alvo for t in termos):
+                continue
+            ja_enviado = db.execute(
+                "SELECT 1 FROM notificacoes_enviadas WHERE concurso_id = ? AND chat_id = ?",
+                (conc["id"], chat_id),
+            ).fetchone()
+            if ja_enviado:
+                continue
+            try:
+                bot.send_message(chat_id, _formatar_mensagem_telegram(conc), disable_web_page_preview=True)
+                db.execute(
+                    "INSERT OR IGNORE INTO notificacoes_enviadas (concurso_id, chat_id, enviado_em) VALUES (?, ?, ?)",
+                    (conc["id"], chat_id, agora),
+                )
+                enviados += 1
+                time.sleep(0.15)  # Evita limite de taxa (rate limit) da API do Telegram em envios em lote
+            except Exception:
+                continue
+    return enviados
 
 def ultima_coleta():
     inicializar_banco()
@@ -322,15 +436,16 @@ def coleta_em_andamento():
 
 def executar_coleta_completa(
     *,
-    limite_pci=100,
-    limite_ache=80,
-    limite_cnb=80,
-    enriquecer_pci=25,
-    enriquecer_ache=20,
-    enriquecer_cnb=20,
+    limite_pci=30,
+    limite_ache=20,
+    limite_cnb=20,
+    enriquecer_pci=5,
+    enriquecer_ache=3,
+    enriquecer_cnb=3,
     baixar_pdf=True,
     publicar=True,
 ):
+
     """
     Executa web scraping + PDF scraping amplo nos portais de concursos públicos,
     mantendo apenas editais com inscrições ainda abertas (prazo >= hoje).
